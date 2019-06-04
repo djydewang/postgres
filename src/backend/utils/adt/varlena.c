@@ -122,10 +122,10 @@ static text *text_substring(Datum str,
 							int32 length,
 							bool length_not_specified);
 static text *text_overlay(text *t1, text *t2, int sp, int sl);
-static int	text_position(text *t1, text *t2, Oid collid);
+static int	text_position(text *t1, text *t2, Oid collid, DetoastIterator iter);
 static void text_position_setup(text *t1, text *t2, Oid collid, TextPositionState *state);
-static bool text_position_next(TextPositionState *state);
-static char *text_position_next_internal(char *start_ptr, TextPositionState *state);
+static bool text_position_next(TextPositionState *state, DetoastIterator iter);
+static char *text_position_next_internal(char *start_ptr, TextPositionState *state, DetoastIterator iter);
 static char *text_position_get_match_ptr(TextPositionState *state);
 static int	text_position_get_match_pos(TextPositionState *state);
 static void text_position_cleanup(TextPositionState *state);
@@ -1092,10 +1092,19 @@ text_overlay(text *t1, text *t2, int sp, int sl)
 Datum
 textpos(PG_FUNCTION_ARGS)
 {
-	text	   *str = PG_GETARG_TEXT_PP(0);
+	text		*str;
+	DetoastIterator iter = create_detoast_iterator((struct varlena *)(DatumGetPointer(PG_GETARG_DATUM(0))));
+	if (iter != NULL)
+	{
+		str = (text *) iter->buf->buf;
+	}
+	else
+	{
+		str = PG_GETARG_TEXT_PP(0);
+	}
 	text	   *search_str = PG_GETARG_TEXT_PP(1);
 
-	PG_RETURN_INT32((int32) text_position(str, search_str, PG_GET_COLLATION()));
+	PG_RETURN_INT32((int32) text_position(str, search_str, PG_GET_COLLATION(), iter));
 }
 
 /*
@@ -1113,7 +1122,7 @@ textpos(PG_FUNCTION_ARGS)
  *	functions.
  */
 static int
-text_position(text *t1, text *t2, Oid collid)
+text_position(text *t1, text *t2, Oid collid, DetoastIterator iter)
 {
 	TextPositionState state;
 	int			result;
@@ -1122,14 +1131,14 @@ text_position(text *t1, text *t2, Oid collid)
 		return 0;
 
 	text_position_setup(t1, t2, collid, &state);
-	if (!text_position_next(&state))
+	if (!text_position_next(&state, iter))
 		result = 0;
 	else
 		result = text_position_get_match_pos(&state);
 	text_position_cleanup(&state);
+	free_detoast_iterator(iter);
 	return result;
 }
-
 
 /*
  * text_position_setup, text_position_next, text_position_cleanup -
@@ -1274,7 +1283,7 @@ text_position_setup(text *t1, text *t2, Oid collid, TextPositionState *state)
  * is found.
  */
 static bool
-text_position_next(TextPositionState *state)
+text_position_next(TextPositionState *state, DetoastIterator iter)
 {
 	int			needle_len = state->len2;
 	char	   *start_ptr;
@@ -1290,7 +1299,7 @@ text_position_next(TextPositionState *state)
 		start_ptr = state->str1;
 
 retry:
-	matchptr = text_position_next_internal(start_ptr, state);
+	matchptr = text_position_next_internal(start_ptr, state, iter);
 
 	if (!matchptr)
 		return false;
@@ -1338,7 +1347,7 @@ retry:
  * match starting at 'start_ptr', or NULL if no match is found.
  */
 static char *
-text_position_next_internal(char *start_ptr, TextPositionState *state)
+text_position_next_internal(char *start_ptr, TextPositionState *state, DetoastIterator iter)
 {
 	int			haystack_len = state->len1;
 	int			needle_len = state->len2;
@@ -1358,6 +1367,9 @@ text_position_next_internal(char *start_ptr, TextPositionState *state)
 		hptr = start_ptr;
 		while (hptr < haystack_end)
 		{
+			if (iter != NULL) {
+				detoast_iterate(hptr - iter->buf->position + 1, iter);
+			}
 			if (*hptr == nchar)
 				return (char *) hptr;
 			hptr++;
@@ -1371,6 +1383,10 @@ text_position_next_internal(char *start_ptr, TextPositionState *state)
 		hptr = start_ptr + needle_len - 1;
 		while (hptr < haystack_end)
 		{
+			if (iter != NULL) {
+				detoast_iterate(hptr - iter->buf->position + 1, iter);
+			}
+
 			/* Match the needle scanning *backward* */
 			const char *nptr;
 			const char *p;
@@ -4231,7 +4247,7 @@ replace_text(PG_FUNCTION_ARGS)
 
 	text_position_setup(src_text, from_sub_text, PG_GET_COLLATION(), &state);
 
-	found = text_position_next(&state);
+	found = text_position_next(&state, NULL);
 
 	/* When the from_sub_text is not found, there is nothing to do. */
 	if (!found)
@@ -4256,7 +4272,7 @@ replace_text(PG_FUNCTION_ARGS)
 
 		start_ptr = curr_ptr + from_sub_text_len;
 
-		found = text_position_next(&state);
+		found = text_position_next(&state, NULL);
 		if (found)
 			curr_ptr = text_position_get_match_ptr(&state);
 	}
@@ -4594,7 +4610,7 @@ split_text(PG_FUNCTION_ARGS)
 
 	/* identify bounds of first field */
 	start_ptr = VARDATA_ANY(inputstring);
-	found = text_position_next(&state);
+	found = text_position_next(&state, NULL);
 
 	/* special case if fldsep not found at all */
 	if (!found)
@@ -4612,7 +4628,7 @@ split_text(PG_FUNCTION_ARGS)
 	{
 		/* identify bounds of next field */
 		start_ptr = end_ptr + fldsep_len;
-		found = text_position_next(&state);
+		found = text_position_next(&state, NULL);
 		if (found)
 			end_ptr = text_position_get_match_ptr(&state);
 	}
@@ -4766,7 +4782,7 @@ text_to_array_internal(PG_FUNCTION_ARGS)
 
 			CHECK_FOR_INTERRUPTS();
 
-			found = text_position_next(&state);
+			found = text_position_next(&state, NULL);
 			if (!found)
 			{
 				/* fetch last field */
