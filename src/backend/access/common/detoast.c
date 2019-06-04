@@ -290,6 +290,110 @@ heap_tuple_untoast_attr_slice(struct varlena *attr,
 }
 
 /* ----------
+ * create_detoast_iterator -
+ *
+ * It only makes sense to initialize a de-TOAST iterator for external on-disk values.
+ *
+ * ----------
+ */
+DetoastIterator
+create_detoast_iterator(struct varlena *attr)
+{
+	struct varatt_external toast_pointer;
+	DetoastIterator iter;
+	if (VARATT_IS_EXTERNAL_ONDISK(attr))
+	{
+		iter = (DetoastIterator) palloc0(sizeof(DetoastIteratorData));
+		iter->done = false;
+
+		/* This is an externally stored datum --- initialize fetch datum iterator */
+		iter->fetch_datum_iterator = create_fetch_datum_iterator(attr);
+		VARATT_EXTERNAL_GET_POINTER(toast_pointer, attr);
+		if (VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer))
+		{
+			iter->compressed = true;
+
+			/* prepare buffer to received decompressed data */
+			iter->buf = (ToastBuffer *) palloc0(sizeof(ToastBuffer));
+			init_toast_buffer(iter->buf, toast_pointer.va_rawsize, false);
+
+			/* initialize state for pglz_decompress_iterate() */
+			iter->ctrl = 0;
+			iter->ctrlc = INVALID_CTRLC;
+		}
+		else
+		{
+			iter->compressed = false;
+
+			/* point the buffer directly at the raw data */
+			iter->buf = iter->fetch_datum_iterator->buf;
+		}
+		return iter;
+	}
+	else if (VARATT_IS_EXTERNAL_INDIRECT(attr))
+	{
+		/* indirect pointer --- dereference it */
+		struct varatt_indirect redirect;
+
+		VARATT_EXTERNAL_GET_POINTER(redirect, attr);
+		attr = (struct varlena *) redirect.pointer;
+
+		/* nested indirect Datums aren't allowed */
+		Assert(!VARATT_IS_EXTERNAL_INDIRECT(attr));
+
+		/* recurse in case value is still extended in some other way */
+		return create_detoast_iterator(attr);
+
+	}
+	else
+		/* in-line value -- no iteration used, even if it's compressed */
+		return NULL;
+}
+
+/* ----------
+ * free_detoast_iterator -
+ *
+ * Free memory used by the de-TOAST iterator, including buffers and
+ * fetch datum iterator.
+ * ----------
+ */
+void
+free_detoast_iterator(DetoastIterator iter)
+{
+	if (iter == NULL)
+		return;
+	if (iter->compressed)
+		free_toast_buffer(iter->buf);
+	free_fetch_datum_iterator(iter->fetch_datum_iterator);
+	pfree(iter);
+}
+
+/* ----------
+ * detoast_iterate -
+ *
+ * Iterate through the toasted value referenced by iterator.
+ *
+ * As long as there is another data chunk in external storage,
+ * de-TOAST it into iterator's toast buffer.
+ * ----------
+ */
+void
+detoast_iterate(DetoastIterator detoast_iter)
+{
+	FetchDatumIterator fetch_iter = detoast_iter->fetch_datum_iterator;
+
+	Assert(detoast_iter != NULL && !detoast_iter->done);
+
+	fetch_datum_iterate(fetch_iter);
+
+	if (detoast_iter->compressed)
+		pglz_decompress_iterate(fetch_iter->buf, detoast_iter->buf, detoast_iter);
+
+	if (detoast_iter->buf->limit == detoast_iter->buf->capacity)
+		detoast_iter->done = true;
+}
+
+/* ----------
  * toast_fetch_datum -
  *
  *	Reconstruct an in memory Datum from the chunks saved

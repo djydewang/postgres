@@ -73,12 +73,109 @@ extern struct varlena *heap_tuple_untoast_attr_slice(struct varlena *attr,
 							  int32 sliceoffset,
 							  int32 slicelength);
 
+#ifndef FRONTEND
+#include "access/genam.h"
+
+/*
+ * TOAST buffer is a producer consumer buffer.
+ *
+ *    +--+--+--+--+--+--+--+--+--+--+--+--+--+
+ *    |  |  |  |  |  |  |  |  |  |  |  |  |  |
+ *    +--+--+--+--+--+--+--+--+--+--+--+--+--+
+ *    ^           ^           ^              ^
+ *   buf      position      limit         capacity
+ *
+ * buf: point to the start of buffer.
+ * position: point to the next char to be consumed.
+ * limit: point to the next char to be produced.
+ * capacity: point to the end of buffer.
+ *
+ * Constraints that need to be satisfied:
+ * buf <= position <= limit <= capacity
+ */
+typedef struct ToastBuffer
+{
+	const char	*buf;
+	const char	*position;
+	char		*limit;
+	const char	*capacity;
+} ToastBuffer;
+
+typedef struct FetchDatumIteratorData
+{
+	ToastBuffer	*buf;
+	Relation	toastrel;
+	Relation	*toastidxs;
+	SysScanDesc	toastscan;
+	ScanKeyData	toastkey;
+	SnapshotData			snapshot;
+	struct varatt_external	toast_pointer;
+	int32		ressize;
+	int32		nextidx;
+	int32		numchunks;
+	int			num_indexes;
+	bool		done;
+}				FetchDatumIteratorData;
+
+typedef struct FetchDatumIteratorData *FetchDatumIterator;
+
+/*
+ * If "ctrlc" field in iterator is equal to INVALID_CTRLC, it means that
+ * the field is invalid and need to read the control byte from the
+ * source buffer in the next iteration, see pglz_decompress_iterate().
+ */
+#define INVALID_CTRLC 8
+
+typedef struct DetoastIteratorData
+{
+	ToastBuffer 		*buf;
+	FetchDatumIterator	fetch_datum_iterator;
+	unsigned char		ctrl;
+	int					ctrlc;
+	bool				compressed;		/* toast value is compressed? */
+	bool				done;
+}			DetoastIteratorData;
+
+typedef struct DetoastIteratorData *DetoastIterator;
+
+/* ----------
+ * create_detoast_iterator -
+ *
+ * It only makes sense to initialize a de-TOAST iterator for external on-disk values.
+ *
+ * ----------
+ */
+extern DetoastIterator create_detoast_iterator(struct varlena *attr);
+
+/* ----------
+ * free_detoast_iterator -
+ *
+ * Free memory used by the de-TOAST iterator, including buffers and
+ * fetch datum iterator.
+ * ----------
+ */
+extern void free_detoast_iterator(DetoastIterator iter);
+
+/* ----------
+ * detoast_iterate -
+ *
+ * Iterate through the toasted value referenced by iterator.
+ *
+ * As long as there is another data chunk in external storage,
+ * de-TOAST it into iterator's toast buffer.
+ * ----------
+ */
+extern void detoast_iterate(DetoastIterator detoast_iter);
+
+#endif
+
 /* ----------
  * toast_raw_datum_size -
  *
  *	Return the raw (detoasted) size of a varlena datum
  * ----------
  */
+
 extern Size toast_raw_datum_size(Datum value);
 
 /* ----------

@@ -15,6 +15,7 @@
 #include "storage/lockdefs.h"
 #include "utils/relcache.h"
 #include "utils/snapshot.h"
+#include "detoast.h"
 
 /*
  *	The information at the start of the compressed toast data.
@@ -50,5 +51,14 @@ extern int	toast_open_indexes(Relation toastrel,
 extern void toast_close_indexes(Relation *toastidxs, int num_indexes,
 								LOCKMODE lock);
 extern void init_toast_snapshot(Snapshot toast_snapshot);
+
+
+extern FetchDatumIterator create_fetch_datum_iterator(struct varlena *attr);
+extern void free_fetch_datum_iterator(FetchDatumIterator iter);
+extern void fetch_datum_iterate(FetchDatumIterator iter);
+extern void init_toast_buffer(ToastBuffer *buf, int32 size, bool compressed);
+extern void free_toast_buffer(ToastBuffer *buf);
+extern void pglz_decompress_iterate(ToastBuffer *source, ToastBuffer *dest,
+									DetoastIterator iter);
 
 #endif							/* TOAST_INTERNALS_H */
