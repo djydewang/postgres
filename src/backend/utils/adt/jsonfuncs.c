@@ -353,7 +353,7 @@ static void get_scalar(void *state, char *token, JsonTokenType tokentype);
 
 /* common worker function for json getter functions */
 static Datum get_path_all(FunctionCallInfo fcinfo, bool as_text);
-static text *get_worker(text *json, char **tpath, int *ipath, int npath,
+static text *get_worker(text *json, DetoastIterator iter, char **tpath, int *ipath, int npath,
 						bool normalize_results);
 static Datum get_jsonb_path_all(FunctionCallInfo fcinfo, bool as_text);
 
@@ -699,12 +699,24 @@ okeys_scalar(void *state, char *token, JsonTokenType tokentype)
 Datum
 json_object_field(PG_FUNCTION_ARGS)
 {
-	text	   *json = PG_GETARG_TEXT_PP(0);
+	DetoastIteratorData iteratorData;
+	DetoastIterator iterator = &iteratorData;
+	text	   *json;
 	text	   *fname = PG_GETARG_TEXT_PP(1);
 	char	   *fnamestr = text_to_cstring(fname);
 	text	   *result;
 
-	result = get_worker(json, &fnamestr, NULL, 1, false);
+	if (init_detoast_iterator((struct varlena *)PG_GETARG_DATUM(0), iterator))
+	{
+		json = (text *) iterator->buf->buf;
+	}
+	else
+	{
+		json = PG_GETARG_TEXT_PP(0);
+		iterator = NULL;
+	}
+
+	result = get_worker(json, iterator, &fnamestr, NULL, 1, false);
 
 	if (result != NULL)
 		PG_RETURN_TEXT_P(result);
@@ -740,7 +752,7 @@ json_object_field_text(PG_FUNCTION_ARGS)
 	char	   *fnamestr = text_to_cstring(fname);
 	text	   *result;
 
-	result = get_worker(json, &fnamestr, NULL, 1, true);
+	result = get_worker(json, NULL, &fnamestr, NULL, 1, true);
 
 	if (result != NULL)
 		PG_RETURN_TEXT_P(result);
@@ -806,7 +818,7 @@ json_array_element(PG_FUNCTION_ARGS)
 	int			element = PG_GETARG_INT32(1);
 	text	   *result;
 
-	result = get_worker(json, NULL, &element, 1, false);
+	result = get_worker(json, NULL, NULL, &element, 1, false);
 
 	if (result != NULL)
 		PG_RETURN_TEXT_P(result);
@@ -849,7 +861,7 @@ json_array_element_text(PG_FUNCTION_ARGS)
 	int			element = PG_GETARG_INT32(1);
 	text	   *result;
 
-	result = get_worker(json, NULL, &element, 1, true);
+	result = get_worker(json, NULL, NULL, &element, 1, true);
 
 	if (result != NULL)
 		PG_RETURN_TEXT_P(result);
@@ -986,7 +998,7 @@ get_path_all(FunctionCallInfo fcinfo, bool as_text)
 			ipath[i] = INT_MIN;
 	}
 
-	result = get_worker(json, tpath, ipath, npath, as_text);
+	result = get_worker(json, NULL, tpath, ipath, npath, as_text);
 
 	if (result != NULL)
 		PG_RETURN_TEXT_P(result);
@@ -1013,6 +1025,7 @@ get_path_all(FunctionCallInfo fcinfo, bool as_text)
  */
 static text *
 get_worker(text *json,
+		   DetoastIterator iter,
 		   char **tpath,
 		   int *ipath,
 		   int npath,
@@ -1021,6 +1034,7 @@ get_worker(text *json,
 	JsonLexContext *lex = makeJsonLexContext(json, true);
 	JsonSemAction *sem = palloc0(sizeof(JsonSemAction));
 	GetState   *state = palloc0(sizeof(GetState));
+	lex->iter = iter;
 
 	Assert(npath >= 0);
 

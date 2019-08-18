@@ -18,6 +18,7 @@
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
 #include "funcapi.h"
+#include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
 #include "mb/pg_wchar.h"
@@ -618,6 +619,7 @@ json_lex(JsonLexContext *lex)
 
 	/* Skip leading whitespace. */
 	s = lex->token_terminator;
+	TRY_DETOAST_ITERATE(lex->iter, s);
 	len = s - lex->input;
 	while (len < lex->input_length &&
 		   (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r'))
@@ -625,6 +627,7 @@ json_lex(JsonLexContext *lex)
 		if (*s == '\n')
 			++lex->line_number;
 		++s;
+		TRY_DETOAST_ITERATE(lex->iter, s);
 		++len;
 	}
 	lex->token_start = s;
@@ -708,8 +711,12 @@ json_lex(JsonLexContext *lex)
 					 * the whole word as an unexpected token, rather than just
 					 * some unintuitive prefix thereof.
 					 */
-					for (p = s; p - s < lex->input_length - len && JSON_ALPHANUMERIC_CHAR(*p); p++)
-						 /* skip */ ;
+					p = s;
+					while (p - s < lex->input_length - len && JSON_ALPHANUMERIC_CHAR(*p))
+					{
+						p++;
+						TRY_DETOAST_ITERATE(lex->iter, p);
+					}
 
 					/*
 					 * We got some sort of unexpected punctuation or an
@@ -767,6 +774,7 @@ json_lex_string(JsonLexContext *lex)
 	for (;;)
 	{
 		s++;
+		TRY_DETOAST_ITERATE(lex->iter, s);
 		len++;
 		/* Premature end of the string. */
 		if (len >= lex->input_length)
@@ -792,6 +800,7 @@ json_lex_string(JsonLexContext *lex)
 		{
 			/* OK, we have an escape character. */
 			s++;
+			TRY_DETOAST_ITERATE(lex->iter, s);
 			len++;
 			if (len >= lex->input_length)
 			{
@@ -806,6 +815,7 @@ json_lex_string(JsonLexContext *lex)
 				for (i = 1; i <= 4; i++)
 				{
 					s++;
+					TRY_DETOAST_ITERATE(lex->iter, s);
 					len++;
 					if (len >= lex->input_length)
 					{
@@ -820,6 +830,7 @@ json_lex_string(JsonLexContext *lex)
 						ch = (ch * 16) + (*s - 'A') + 10;
 					else
 					{
+						// TODO check whether read the unallocated data
 						lex->token_terminator = s + pg_mblen(s);
 						ereport(ERROR,
 								(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
@@ -1035,9 +1046,11 @@ json_lex_number(JsonLexContext *lex, char *s,
 	/* Caller already did this for us; so do nothing. */
 
 	/* Part (2): parse main digit string. */
+	TRY_DETOAST_ITERATE(lex->iter, s);
 	if (len < lex->input_length && *s == '0')
 	{
 		s++;
+		TRY_DETOAST_ITERATE(lex->iter, s);
 		len++;
 	}
 	else if (len < lex->input_length && *s >= '1' && *s <= '9')
@@ -1045,6 +1058,7 @@ json_lex_number(JsonLexContext *lex, char *s,
 		do
 		{
 			s++;
+			TRY_DETOAST_ITERATE(lex->iter, s);
 			len++;
 		} while (len < lex->input_length && *s >= '0' && *s <= '9');
 	}
@@ -1055,6 +1069,7 @@ json_lex_number(JsonLexContext *lex, char *s,
 	if (len < lex->input_length && *s == '.')
 	{
 		s++;
+		TRY_DETOAST_ITERATE(lex->iter, s);
 		len++;
 		if (len == lex->input_length || *s < '0' || *s > '9')
 			error = true;
@@ -1063,6 +1078,7 @@ json_lex_number(JsonLexContext *lex, char *s,
 			do
 			{
 				s++;
+				TRY_DETOAST_ITERATE(lex->iter, s);
 				len++;
 			} while (len < lex->input_length && *s >= '0' && *s <= '9');
 		}
@@ -1072,10 +1088,12 @@ json_lex_number(JsonLexContext *lex, char *s,
 	if (len < lex->input_length && (*s == 'e' || *s == 'E'))
 	{
 		s++;
+		TRY_DETOAST_ITERATE(lex->iter, s);
 		len++;
 		if (len < lex->input_length && (*s == '+' || *s == '-'))
 		{
 			s++;
+			TRY_DETOAST_ITERATE(lex->iter, s);
 			len++;
 		}
 		if (len == lex->input_length || *s < '0' || *s > '9')
@@ -1085,6 +1103,7 @@ json_lex_number(JsonLexContext *lex, char *s,
 			do
 			{
 				s++;
+				TRY_DETOAST_ITERATE(lex->iter, s);
 				len++;
 			} while (len < lex->input_length && *s >= '0' && *s <= '9');
 		}
@@ -1095,8 +1114,13 @@ json_lex_number(JsonLexContext *lex, char *s,
 	 * here should be considered part of the token for error-reporting
 	 * purposes.
 	 */
-	for (; len < lex->input_length && JSON_ALPHANUMERIC_CHAR(*s); s++, len++)
+	while (len < lex->input_length && JSON_ALPHANUMERIC_CHAR(*s))
+	{
 		error = true;
+		s++;
+		TRY_DETOAST_ITERATE(lex->iter, s);
+		len++;
+	}
 
 	if (total_len != NULL)
 		*total_len = len;

@@ -14,6 +14,7 @@
 #ifndef JSONAPI_H
 #define JSONAPI_H
 
+#include <access/tuptoaster.h>
 #include "jsonb.h"
 #include "lib/stringinfo.h"
 
@@ -51,6 +52,7 @@ typedef enum
 typedef struct JsonLexContext
 {
 	char	   *input;
+	DetoastIterator iter;
 	int			input_length;
 	char	   *token_start;
 	char	   *token_terminator;

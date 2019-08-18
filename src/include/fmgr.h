@@ -246,6 +246,13 @@ extern struct varlena *pg_detoast_datum_packed(struct varlena *datum);
 			detoast_iterate(iter);										\
 		}																\
 	} while (0)
+#define TRY_DETOAST_ITERATE(iter, need)		\
+	do {									\
+		if (iter != NULL)					\
+		{									\
+			PG_DETOAST_ITERATE(iter, need);	\
+		}									\
+	} while (0)
 /* WARNING -- unaligned pointer */
 #define PG_DETOAST_DATUM_PACKED(datum) \
 	pg_detoast_datum_packed((struct varlena *) DatumGetPointer(datum))
